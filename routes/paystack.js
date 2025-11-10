@@ -82,30 +82,22 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         } else {
           console.log('🛒 Cart cleared for user:', metadata.user_id);
         }
-        // ✅ Fetch order items for this order
-        const { data: orderItems, error: itemsError } = await supabaseAdmin
-          .from('order_items')
-          .select('product_id, quantity')
-          .eq('order_id', metadata.order_id);
-
-        if (itemsError) {
-          console.error('⚠️ Failed to fetch order items:', itemsError);
-        } else {
-          console.log(`📦 Found ${orderItems.length} order items — updating stock...`);
-
-          // ✅ Loop through each item and decrement stock
-          for (const item of orderItems) {
+        // Fetch order items from JSON field in the order record
+        if (order.order_items && Array.isArray(order.order_items)) {
+          for (const item of order.order_items) {
             const { error: stockError } = await supabaseAdmin.rpc('decrement_stock', {
               product_id: item.product_id,
               quantity: item.quantity
             });
 
             if (stockError) {
-              console.error(`⚠️ Failed to update stock for product ${item.product_id}:`, stockError);
+              console.error(`⚠️ Failed to decrement stock for ${item.product_id}:`, stockError);
             } else {
               console.log(`✅ Stock decremented for product ${item.product_id}`);
             }
           }
+        } else {
+          console.warn('⚠️ No order items found in JSON field for order:', order.id);
         }
 
 
