@@ -84,19 +84,11 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         }
 
         // Update product stock
-        for (const item of order.order_items) {
-          const { error: stockError } = await supabaseAdmin
-            .from('products')
-            .update({ 
-              stock: supabaseAdmin.sql`stock - ${item.quantity}`
-            })
-            .eq('id', item.product_id)
-            .gte('stock', item.quantity);
+        await supabaseAdmin.rpc('decrement_stock', {
+  product_id: item.product_id,
+  quantity: item.quantity
+});
 
-          if (stockError) {
-            console.error('⚠️ Failed to update stock for:', item.product_name);
-          }
-        }
 
         // Get user details for email
         const { data: user } = await supabaseAdmin
