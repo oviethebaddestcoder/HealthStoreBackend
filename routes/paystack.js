@@ -32,7 +32,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     // Handle successful payment
     if (event.event === 'charge.success') {
       const { reference, status, metadata, amount } = event.data;
-      
+
       console.log('✅ Payment successful:', {
         reference,
         order_id: metadata?.order_id,
@@ -55,7 +55,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         // Update order status
         const { data: updatedOrder, error: updateError } = await supabaseAdmin
           .from('orders')
-          .update({ 
+          .update({
             payment_status: 'success',
             order_status: 'processing',
             payment_reference: reference
@@ -82,12 +82,31 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         } else {
           console.log('🛒 Cart cleared for user:', metadata.user_id);
         }
+        // ✅ Fetch order items for this order
+        const { data: orderItems, error: itemsError } = await supabaseAdmin
+          .from('order_items')
+          .select('product_id, quantity')
+          .eq('order_id', metadata.order_id);
 
-        // Update product stock
-        await supabaseAdmin.rpc('decrement_stock', {
-  product_id: item.product_id,
-  quantity: item.quantity
-});
+        if (itemsError) {
+          console.error('⚠️ Failed to fetch order items:', itemsError);
+        } else {
+          console.log(`📦 Found ${orderItems.length} order items — updating stock...`);
+
+          // ✅ Loop through each item and decrement stock
+          for (const item of orderItems) {
+            const { error: stockError } = await supabaseAdmin.rpc('decrement_stock', {
+              product_id: item.product_id,
+              quantity: item.quantity
+            });
+
+            if (stockError) {
+              console.error(`⚠️ Failed to update stock for product ${item.product_id}:`, stockError);
+            } else {
+              console.log(`✅ Stock decremented for product ${item.product_id}`);
+            }
+          }
+        }
 
 
         // Get user details for email
@@ -98,8 +117,8 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
           .single();
 
 
-        return res.json({ 
-          received: true, 
+        return res.json({
+          received: true,
           message: 'Payment processed successfully',
           order_id: updatedOrder.id
         });
@@ -109,7 +128,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     // Handle failed payment
     if (event.event === 'charge.failed') {
       const { reference, metadata } = event.data;
-      
+
       console.log('❌ Payment failed:', {
         reference,
         order_id: metadata?.order_id
@@ -118,7 +137,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       if (metadata?.order_id) {
         await supabaseAdmin
           .from('orders')
-          .update({ 
+          .update({
             payment_status: 'failed',
             order_status: 'cancelled',
             payment_reference: reference
@@ -215,27 +234,27 @@ router.post('/verify', authenticateToken, async (req, res) => {
         order: updatedOrder
       });
     } else {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
         error: 'Payment verification failed',
-        gateway_response: paymentData.gateway_response 
+        gateway_response: paymentData.gateway_response
       });
     }
 
   } catch (error) {
     console.error('❌ Manual verification error:', error);
-    
+
     if (error.response?.data) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
         error: 'Payment verification failed',
-        details: error.response.data 
+        details: error.response.data
       });
     }
-    
-    res.status(500).json({ 
+
+    res.status(500).json({
       success: false,
-      error: 'Failed to verify payment' 
+      error: 'Failed to verify payment'
     });
   }
 });
