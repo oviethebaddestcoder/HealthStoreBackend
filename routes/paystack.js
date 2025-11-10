@@ -1,99 +1,164 @@
-﻿import express from 'express';
+﻿// routes/paystack.js - Simplified Payment Routes
+import express from 'express';
 import axios from 'axios';
+import crypto from 'crypto';
 import { supabaseAdmin } from '../config/supabase.js';
 import { authenticateToken } from '../middleware/auth.js';
-import dotenv from 'dotenv';
 
-dotenv.config();
 
 const router = express.Router();
 
-// Initialize Paystack payment
-router.post('/initialize', authenticateToken, async (req, res) => {
+/**
+ * Webhook handler - PRIMARY payment verification method
+ * This is called automatically by Paystack when payment status changes
+ */
+router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
-    const { order_id, email, amount } = req.body;
+    // Verify webhook signature
+    const secret = process.env.PAYSTACK_SECRET_KEY;
+    const hash = crypto.createHmac('sha512', secret).update(req.body).digest('hex');
+    const signature = req.headers['x-paystack-signature'];
 
-    if (!order_id || !email || !amount) {
-      return res.status(400).json({ 
-        error: 'Order ID, email, and amount are required' 
+    console.log('📥 Paystack webhook received');
+
+    if (hash !== signature) {
+      console.error('❌ Invalid webhook signature');
+      return res.status(401).json({ error: 'Invalid signature' });
+    }
+
+    const event = JSON.parse(req.body);
+    console.log('📋 Event type:', event.event);
+
+    // Handle successful payment
+    if (event.event === 'charge.success') {
+      const { reference, status, metadata, amount } = event.data;
+      
+      console.log('✅ Payment successful:', {
+        reference,
+        order_id: metadata?.order_id,
+        amount: amount / 100
       });
-    }
 
-    // Verify order exists and belongs to user
-    const { data: order, error: orderError } = await supabaseAdmin
-      .from('orders')
-      .select('*')
-      .eq('id', order_id)
-      .eq('user_id', req.user.id)
-      .single();
+      if (metadata?.order_id && metadata?.user_id) {
+        // Get order details
+        const { data: order, error: orderError } = await supabaseAdmin
+          .from('orders')
+          .select('*')
+          .eq('id', metadata.order_id)
+          .single();
 
-    if (orderError || !order) {
-      return res.status(404).json({ error: 'Order not found' });
-    }
-
-    // Initialize Paystack transaction
-    const response = await axios.post(
-      'https://api.paystack.co/transaction/initialize',
-      {
-        email,
-        amount: Math.round(amount * 100), // Convert to kobo
-        reference: `order_${order_id}_${Date.now()}`,
-        callback_url: `${process.env.FRONTEND_URL}/verify-payment`,
-        metadata: {
-          order_id,
-          user_id: req.user.id,
-          custom_fields: [
-            {
-              display_name: "Order ID",
-              variable_name: "order_id",
-              value: order_id
-            }
-          ]
+        if (orderError) {
+          console.error('❌ Order not found:', orderError);
+          return res.status(404).json({ error: 'Order not found' });
         }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-          'Content-Type': 'application/json'
+
+        // Update order status
+        const { data: updatedOrder, error: updateError } = await supabaseAdmin
+          .from('orders')
+          .update({ 
+            payment_status: 'success',
+            order_status: 'processing',
+            payment_reference: reference
+          })
+          .eq('id', metadata.order_id)
+          .select()
+          .single();
+
+        if (updateError) {
+          console.error('❌ Failed to update order:', updateError);
+          return res.status(500).json({ error: 'Failed to update order' });
         }
+
+        console.log('✅ Order updated successfully:', updatedOrder.id);
+
+        // Clear user's cart
+        const { error: cartError } = await supabaseAdmin
+          .from('cart')
+          .delete()
+          .eq('user_id', metadata.user_id);
+
+        if (cartError) {
+          console.error('⚠️ Failed to clear cart:', cartError);
+        } else {
+          console.log('🛒 Cart cleared for user:', metadata.user_id);
+        }
+
+        // Update product stock
+        for (const item of order.order_items) {
+          const { error: stockError } = await supabaseAdmin
+            .from('products')
+            .update({ 
+              stock: supabaseAdmin.sql`stock - ${item.quantity}`
+            })
+            .eq('id', item.product_id)
+            .gte('stock', item.quantity);
+
+          if (stockError) {
+            console.error('⚠️ Failed to update stock for:', item.product_name);
+          }
+        }
+
+        // Get user details for email
+        const { data: user } = await supabaseAdmin
+          .from('users')
+          .select('full_name, email')
+          .eq('id', metadata.user_id)
+          .single();
+
+
+        return res.json({ 
+          received: true, 
+          message: 'Payment processed successfully',
+          order_id: updatedOrder.id
+        });
       }
-    );
-
-    const { data } = response.data;
-
-    // Update order with payment reference
-    await supabaseAdmin
-      .from('orders')
-      .update({ 
-        payment_reference: data.reference 
-      })
-      .eq('id', order_id);
-
-    res.json({
-      message: 'Payment initialized successfully',
-      authorization_url: data.authorization_url,
-      access_code: data.access_code,
-      reference: data.reference
-    });
-  } catch (error) {
-    console.error('Initialize payment error:', error);
-    
-    if (error.response?.data) {
-      return res.status(400).json({ 
-        error: 'Payment initialization failed',
-        details: error.response.data 
-      });
     }
-    
-    res.status(500).json({ error: 'Failed to initialize payment' });
+
+    // Handle failed payment
+    if (event.event === 'charge.failed') {
+      const { reference, metadata } = event.data;
+      
+      console.log('❌ Payment failed:', {
+        reference,
+        order_id: metadata?.order_id
+      });
+
+      if (metadata?.order_id) {
+        await supabaseAdmin
+          .from('orders')
+          .update({ 
+            payment_status: 'failed',
+            order_status: 'cancelled',
+            payment_reference: reference
+          })
+          .eq('id', metadata.order_id);
+
+        console.log('📝 Order marked as failed:', metadata.order_id);
+      }
+    }
+
+    res.json({ received: true });
+  } catch (error) {
+    console.error('❌ Webhook error:', error);
+    res.status(500).json({ error: 'Webhook processing failed' });
   }
 });
 
-// Verify payment manually
-router.get('/verify/:reference', authenticateToken, async (req, res) => {
+/**
+ * Manual verification endpoint - BACKUP verification method
+ * Used when user returns from Paystack or for manual verification
+ */
+router.post('/verify', authenticateToken, async (req, res) => {
   try {
-    const { reference } = req.params;
+    const { reference } = req.body;
 
+    if (!reference) {
+      return res.status(400).json({ error: 'Payment reference is required' });
+    }
+
+    console.log('🔍 Manual verification requested for:', reference);
+
+    // Verify with Paystack API
     const response = await axios.get(
       `https://api.paystack.co/transaction/verify/${reference}`,
       {
@@ -103,43 +168,133 @@ router.get('/verify/:reference', authenticateToken, async (req, res) => {
       }
     );
 
-    const { data } = response.data;
+    const { data: paymentData } = response.data;
 
-    if (data.status === 'success') {
-      // Update order status
-      const { error } = await supabaseAdmin
+    if (paymentData.status === 'success') {
+      // Get order from reference
+      const { data: order, error: orderError } = await supabaseAdmin
         .from('orders')
-        .update({ 
-          payment_status: 'success'
-        })
-        .eq('payment_reference', reference);
+        .select('*')
+        .eq('payment_reference', reference)
+        .eq('user_id', req.user.id)
+        .single();
 
-      if (error) {
-        throw error;
+      if (orderError || !order) {
+        return res.status(404).json({ error: 'Order not found' });
       }
 
-      // Clear user cart
+      // Check if already processed
+      if (order.payment_status === 'success') {
+        return res.json({
+          success: true,
+          message: 'Payment already verified',
+          order_id: order.id,
+          already_processed: true
+        });
+      }
+
+      // Update order (webhook might have already done this)
+      const { data: updatedOrder, error: updateError } = await supabaseAdmin
+        .from('orders')
+        .update({
+          payment_status: 'success',
+          order_status: 'processing',
+        })
+        .eq('id', order.id)
+        .select()
+        .single();
+
+      if (updateError) {
+        throw updateError;
+      }
+
+      // Clear cart (in case webhook didn't)
       await supabaseAdmin
         .from('cart')
         .delete()
         .eq('user_id', req.user.id);
 
-      res.json({
-        status: 'success',
+      console.log('✅ Manual verification successful:', order.id);
+
+      return res.json({
+        success: true,
         message: 'Payment verified successfully',
-        order_id: data.metadata.order_id
+        order_id: updatedOrder.id,
+        order: updatedOrder
       });
     } else {
-      res.status(400).json({
-        status: 'failed',
-        message: 'Payment verification failed',
-        gateway_response: data.gateway_response
+      return res.status(400).json({ 
+        success: false,
+        error: 'Payment verification failed',
+        gateway_response: paymentData.gateway_response 
       });
     }
+
   } catch (error) {
-    console.error('Verify payment error:', error);
-    res.status(500).json({ error: 'Payment verification failed' });
+    console.error('❌ Manual verification error:', error);
+    
+    if (error.response?.data) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Payment verification failed',
+        details: error.response.data 
+      });
+    }
+    
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to verify payment' 
+    });
   }
+});
+
+/**
+ * Check payment status - GET endpoint for frontend
+ */
+router.get('/status/:reference', authenticateToken, async (req, res) => {
+  try {
+    const { reference } = req.params;
+
+    // Get order by payment reference
+    const { data: order, error } = await supabaseAdmin
+      .from('orders')
+      .select('id, payment_status, order_status, total, created_at')
+      .eq('payment_reference', reference)
+      .eq('user_id', req.user.id)
+      .single();
+
+    if (error || !order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    res.json({
+      order_id: order.id,
+      payment_status: order.payment_status,
+      order_status: order.order_status,
+      is_paid: order.payment_status === 'success',
+      total: order.total,
+      created_at: order.created_at
+    });
+  } catch (error) {
+    console.error('Status check error:', error);
+    res.status(500).json({ error: 'Failed to check payment status' });
+  }
+});
+
+/**
+ * Test webhook endpoint - for development
+ */
+router.get('/webhook/test', (req, res) => {
+  res.json({
+    status: 'Webhook endpoint is active',
+    url: `${process.env.BACKEND_URL || 'http://localhost:5000'}/api/paystack/webhook`,
+    method: 'POST',
+    note: 'Configure this URL in your Paystack dashboard under Settings > Webhooks',
+    events_to_enable: [
+      'charge.success',
+      'charge.failed'
+    ]
+  });
 });
 
 export default router;

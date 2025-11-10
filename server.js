@@ -1,11 +1,10 @@
-﻿import express from 'express';
+﻿// server.js
+import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import session from 'express-session';
 import dotenv from 'dotenv';
-import crypto from 'crypto';
-import { supabaseAdmin } from './config/supabase.js';
 import passport from './config/passport.js';
 
 // Import routes
@@ -49,123 +48,31 @@ app.use(session({
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Paystack webhook - BEFORE express.json()
-app.post('/api/paystack/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  try {
-    const secret = process.env.PAYSTACK_SECRET_KEY;
-    const hash = crypto.createHmac('sha512', secret).update(req.body).digest('hex');
-    const signature = req.headers['x-paystack-signature'];
+// IMPORTANT: Paystack webhook route MUST be before express.json()
+// This is because webhooks need raw body for signature verification
+app.use('/api/paystack', paystackRoutes);
 
-    console.log('📥 Webhook received from Paystack');
-
-    if (hash !== signature) {
-      console.error('❌ Invalid webhook signature');
-      return res.status(401).json({ error: 'Invalid signature' });
-    }
-
-    const event = JSON.parse(req.body);
-    console.log('📋 Webhook event:', event.event);
-
-    if (event.event === 'charge.success') {
-      const { reference, status, metadata } = event.data;
-      
-      console.log('✅ Payment successful:', {
-        reference,
-        status,
-        order_id: metadata?.order_id
-      });
-
-      if (metadata?.order_id && metadata?.user_id) {
-        const { data: updatedOrder, error: updateError } = await supabaseAdmin
-          .from('orders')
-          .update({ 
-            payment_status: 'success',
-            payment_reference: reference
-          })
-          .eq('id', metadata.order_id)
-          .select()
-          .single();
-
-        if (updateError) {
-          console.error('❌ Failed to update order:', updateError);
-          return res.status(500).json({ error: 'Failed to update order' });
-        }
-
-        console.log('✅ Order updated:', updatedOrder.id);
-
-        const { error: cartError } = await supabaseAdmin
-          .from('cart')
-          .delete()
-          .eq('user_id', metadata.user_id);
-
-        if (cartError) {
-          console.error('⚠️ Failed to clear cart:', cartError);
-        } else {
-          console.log('🛒 Cart cleared for user:', metadata.user_id);
-        }
-
-        return res.json({ 
-          received: true, 
-          message: 'Payment processed successfully' 
-        });
-      }
-    }
-
-    if (event.event === 'charge.failed') {
-      const { reference, metadata } = event.data;
-      
-      console.log('❌ Payment failed:', {
-        reference,
-        order_id: metadata?.order_id
-      });
-
-      if (metadata?.order_id) {
-        await supabaseAdmin
-          .from('orders')
-          .update({ 
-            payment_status: 'failed',
-            payment_reference: reference
-          })
-          .eq('id', metadata.order_id);
-
-        console.log('📝 Order marked as failed:', metadata.order_id);
-      }
-    }
-
-    res.json({ received: true });
-  } catch (error) {
-    console.error('❌ Webhook error:', error);
-    res.status(500).json({ error: 'Webhook processing failed' });
-  }
-});
-
-// Regular JSON middleware
+// Regular JSON middleware - AFTER webhook route
 app.use(express.json({ limit: '10mb' }));
 
-// Routes
+// All other routes
 app.use('/api/auth', authRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/cart', cartRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/admin', adminRoutes);
-app.use('/api/paystack', paystackRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
-    message: 'Healthcare E-commerce API is running',
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Webhook test endpoint
-app.get('/api/paystack/webhook/test', (req, res) => {
-  res.json({
-    status: 'Webhook endpoint is active',
-    url: '/api/paystack/webhook',
-    method: 'POST',
-    note: 'Configure this URL in your Paystack dashboard'
+    message: 'Health Excellence API is running',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      webhook: `${process.env.BACKEND_URL || 'http://localhost:5000'}/api/paystack/webhook`,
+      verify: '/api/paystack/verify',
+      status: '/api/paystack/status/:reference'
+    }
   });
 });
 
@@ -185,9 +92,30 @@ app.use('*', (req, res) => {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`🏥 Healthcare E-commerce Backend API`);
-  console.log(`📍 Health check: http://localhost:${PORT}/api/health`);
-  console.log(`🔔 Webhook URL: http://localhost:${PORT}/api/paystack/webhook`);
-  console.log(`🔐 Google OAuth: http://localhost:${PORT}/api/auth/google`);
+  console.log(`
+
+
+    
+  🌿 Health Excellence E-commerce API                        
+🚀 Server running on port ${PORT}                              
+   📍 Health check: http://localhost:${PORT}/api/health          
+        
+💳 Payment Endpoints:                                       
+      🔔 Webhook: http://localhost:${PORT}/api/paystack/webhook    
+   ✅ Verify: POST /api/paystack/verify                   
+
+   📊 Status: GET /api/paystack/status/:reference             
+   🔐 OAuth: http://localhost:${PORT}/api/auth/google        
+  `);
+  
+  console.log('⚙️  Configuration:');
+  console.log(`   - Frontend URL: ${process.env.FRONTEND_URL}`);
+  console.log(`   - Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`   - Paystack: ${process.env.PAYSTACK_SECRET_KEY ? '✅ Configured' : '❌ Not configured'}`);
+  console.log('');
+  console.log('📝 Next steps:');
+  console.log('   1. Configure webhook URL in Paystack dashboard');
+  console.log('   2. Enable events: charge.success, charge.failed');
+  console.log('   3. Test webhook: GET /api/paystack/webhook/test');
+  console.log('');
 });
