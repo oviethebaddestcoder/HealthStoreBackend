@@ -5,7 +5,7 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 export const sendOrderConfirmationEmail = async (order, userEmail, userName = 'Customer') => {
   try {
     const { data, error } = await resend.emails.send({
-      from: 'Health-Excellence <HealthExcellence@resend.dev>', // Replace with your verified domain
+      from: 'Health Excellence <hello@healthexcellence.shop>', // Replace with your verified domain
       to: [userEmail],
       subject: `Order Confirmation - #${order.id}`,
       html: `

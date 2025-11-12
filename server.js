@@ -113,9 +113,5 @@ app.listen(PORT, () => {
   console.log(`   - Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`   - Paystack: ${process.env.PAYSTACK_SECRET_KEY ? '✅ Configured' : '❌ Not configured'}`);
   console.log('');
-  console.log('📝 Next steps:');
-  console.log('   1. Configure webhook URL in Paystack dashboard');
-  console.log('   2. Enable events: charge.success, charge.failed');
-  console.log('   3. Test webhook: GET /api/paystack/webhook/test');
-  console.log('');
+ 
 });
