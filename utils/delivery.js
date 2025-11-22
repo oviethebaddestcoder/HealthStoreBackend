@@ -1,21 +1,21 @@
 ﻿export function calculateDeliveryFee(state) {
-  if (!state) return 5000; // Default fee if no state provided
+  if (!state) return 9000; // Default fee if no state provided
   
   const normalizedState = state.toLowerCase().trim();
   
   // Lagos delivery fee
   if (normalizedState === 'lagos') {
-    return 3500;
+    return 10000;
   }
   
   // Nearby states (cheaper delivery) - 5000
   const nearbyStates = ['ogun', 'oyo', 'osun', 'ondo', 'ekiti', 'edo'];
   if (nearbyStates.includes(normalizedState)) {
-    return 5000;
+    return 23000;
   }
   
   // Far states (more expensive delivery) - 6000
-  return 6000;
+  return 27000;
 }
 
 export function calculateOrderTotals(items, state, discount = null) {
